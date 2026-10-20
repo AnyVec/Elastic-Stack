@@ -1,0 +1,17 @@
+# logstash/config/logstash.yml
+
+# ──────────────────────────────────────────────
+# API Server
+# ──────────────────────────────────────────────
+api.http.host: 0.0.0.0
+api.http.port: 9600
+
+# ──────────────────────────────────────────────
+# Monitoring
+# ──────────────────────────────────────────────
+# Legacy internal monitoring is disabled by default since 9.0
+# Uncomment the line below ONLY if you need to continue using legacy monitoring
+# References:
+# - https://www.elastic.co/guide/en/elastic-stack/9.0/release-notes-logstash-9.0.0.html#allow-legacy-monitoring
+# - https://www.elastic.co/docs/release-notes/logstash/breaking-changes#logstash-900-breaking-changes
+# xpack.monitoring.allow_legacy_collection: true

@@ -1,0 +1,53 @@
+# caddy/Caddyfile
+{
+	admin off
+}
+
+# Shared security headers
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Remove server fingerprinting
+		-Server
+		-X-Powered-By
+		defer
+	}
+}
+
+# Shared backend TLS (trusts internal self-signed CA)
+(internal_tls) {
+	transport http {
+		tls
+		tls_trust_pool file /etc/caddy/certs/ca/ca.crt
+	}
+}
+
+kibana.yourdomain.com {
+	import security_headers
+
+	reverse_proxy kibana:5601 {
+		import internal_tls
+	}
+
+	log {
+		output file /var/log/caddy/kibana.log
+		level INFO
+	}
+}
+
+# Activate and use only if you have a specific real-world case
+# elasticsearch.yourdomain.com {
+# 		import security_headers
+#
+# 		reverse_proxy elasticsearch:9200 {
+# 			import internal_tls
+# 		}
+#
+# 		log {
+# 			output file /var/log/caddy/elasticsearch.log
+# 			level  INFO
+# 		}
+# }

@@ -1,0 +1,230 @@
+# docker-compose.yml
+
+services:
+  # ── Certificate Setup ──────────────────────────────────────────────────────
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: elk-setup
+    restart: "no"
+    user: "0"
+    volumes:
+      - ./setup/create-certs.sh:/create-certs.sh:ro
+      - certs:/usr/share/elasticsearch/config/certs
+    command: bash /create-certs.sh
+    network_mode: none
+    healthcheck:
+      test: ["CMD-SHELL", "[ -f config/certs/elasticsearch/elasticsearch.crt ]"]
+      interval: 1s
+      timeout: 5s
+      retries: 120
+
+  # ── Elasticsearch ──────────────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: elk-elasticsearch
+    mem_limit: ${ES_MEM_LIMIT}
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    environment:
+      - CLUSTER_NAME=${CLUSTER_NAME}    # Resolved by ${CLUSTER_NAME} in elasticsearch.yml
+      # - node.name=es01                # Change the node name via env vars (instead of elasticsearch.yml)
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - xpack.license.self_generated.type=${LICENSE}
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g      # Half of ES_MEM_LIMIT (4 GB)
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs:ro
+      - ./elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+      - esdata:/usr/share/elasticsearch/data
+    expose:
+      - "9200"  # Elasticsearch HTTP API - internal only OR through reverse proxy
+    networks:
+      - br_elk
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
+  # ── Password Setup ─────────────────────────────────────────────────────────
+  init-passwords:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: elk-init-passwords
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KIBANA_PASSWORD=${KIBANA_PASSWORD}
+      - LOGSTASH_PASSWORD=${LOGSTASH_PASSWORD}
+    volumes:
+      - certs:/usr/share/elasticsearch/config/certs:ro
+    networks:
+      - br_elk
+    command:
+      - bash
+      - -c
+      - |
+          set -e   # stop at the first failed request (curl -f)
+
+          echo "Setting kibana_system password..."
+          curl -sSf -X POST \
+            --cacert config/certs/ca/ca.crt \
+            -u "elastic:${ELASTIC_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            https://elasticsearch:9200/_security/user/kibana_system/_password \
+            -d "{\"password\":\"${KIBANA_PASSWORD}\"}"
+
+          echo "Creating logstash_writer role..."
+          curl -sSf -X POST \
+            --cacert config/certs/ca/ca.crt \
+            -u "elastic:${ELASTIC_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            https://elasticsearch:9200/_security/role/logstash_writer \
+            -d "{
+              \"cluster\": [\"monitor\", \"manage_index_templates\"],
+              \"indices\": [{
+                \"names\": [\"*beat-*\", \"tcp-logs-*\"],
+                \"privileges\": [\"write\", \"create_index\"]
+              }]
+            }"
+
+          echo "Creating logstash_internal user..."
+          curl -sSf -X POST \
+            --cacert config/certs/ca/ca.crt \
+            -u "elastic:${ELASTIC_PASSWORD}" \
+            -H "Content-Type: application/json" \
+            https://elasticsearch:9200/_security/user/logstash_internal \
+            -d "{
+              \"password\": \"${LOGSTASH_PASSWORD}\",
+              \"roles\": [\"logstash_writer\"],
+              \"full_name\": \"Logstash Internal User\"
+            }"
+
+          echo "Passwords configured!"
+
+  # ── Logstash ───────────────────────────────────────────────────────────────
+  logstash:
+    image: docker.elastic.co/logstash/logstash:${ELASTIC_VERSION}
+    container_name: elk-logstash
+    mem_limit: ${LS_MEM_LIMIT}
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      init-passwords:
+        condition: service_completed_successfully   # logstash_internal must exist
+    restart: unless-stopped
+    environment:
+      - LOGSTASH_PASSWORD=${LOGSTASH_PASSWORD}
+      - LS_JAVA_OPTS=-Xms1g -Xmx1g     # Half of LS_MEM_LIMIT (2 GB)
+    volumes:
+      - certs:/usr/share/logstash/certs:ro
+      - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - logstashdata:/usr/share/logstash/data
+    ports:
+      - "5044:5044"   # Beats input - exposed for external agents
+      - "5000:5000"   # TCP input  - exposed for external log shippers
+    expose:
+      - "9600"        # Logstash API - internal only OR through reverse proxy
+    networks:
+      - br_elk
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9600 | grep -q 'green'"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+
+  # ── Kibana ─────────────────────────────────────────────────────────────────
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION}
+    container_name: elk-kibana
+    mem_limit: ${KB_MEM_LIMIT}
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      init-passwords:
+        condition: service_completed_successfully   # kibana_system password must be set
+    restart: unless-stopped
+    environment:
+      # Elasticsearch connection
+      - ELASTICSEARCH_HOSTS=https://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
+      # TLS - Kibana <-> Elasticsearch
+      - ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES=config/certs/ca/ca.crt
+      - ELASTICSEARCH_SSL_VERIFICATIONMODE=full
+      # TLS - Browser <-> Kibana
+      - SERVER_SSL_ENABLED=true
+      - SERVER_SSL_KEY=config/certs/kibana/kibana.key
+      - SERVER_SSL_CERTIFICATE=config/certs/kibana/kibana.crt
+      # Encryption keys - never stored in kibana.yml
+      - XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY=${KIBANA_ENCRYPTION_KEY}
+      - XPACK_REPORTING_ENCRYPTIONKEY=${KIBANA_REPORTING_KEY}
+      - XPACK_SECURITY_ENCRYPTIONKEY=${KIBANA_SECURITY_KEY}
+    volumes:
+      - certs:/usr/share/kibana/config/certs:ro
+      - ./kibana/config/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+      - kibanadata:/usr/share/kibana/data
+    expose:
+      - "5601"  # Kibana - internal only OR through reverse proxy
+    networks:
+      - br_elk
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt https://localhost:5601/api/status | grep -q 'available'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
+  # ── Caddy Reverse Proxy ────────────────────────────────────────────────────
+  caddy:
+    image: caddy:alpine
+    container_name: elk-caddy
+    depends_on:
+      kibana:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - certs:/etc/caddy/certs:ro               # Internal self-signed CA
+      - caddy_data:/data                        # Let's Encrypt certificates
+    ports:
+      - "80:80"       # ACME HTTP challenge + redirect to HTTPS
+      - "443:443"     # Public HTTPS
+    networks:
+      - br_elk
+
+# ── Volumes ────────────────────────────────────────────────────────────────
+volumes:
+  certs:
+    driver: local
+  esdata:
+    driver: local
+  logstashdata:
+    driver: local
+  kibanadata:
+    driver: local
+  caddy_data:         # Persists certificates
+    driver: local
+
+# ── Networks ───────────────────────────────────────────────────────────────
+networks:
+  br_elk:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24

@@ -1,0 +1,34 @@
+# kibana/config/kibana.yml
+
+# ──────────────────────────────────────────────
+# Server
+# ──────────────────────────────────────────────
+server.name: kibana
+server.host: 0.0.0.0
+server.port: 5601
+
+# ──────────────────────────────────────────────
+# Security
+# NOTE: xpack.security.enabled was removed in 8.x+
+# Security is always on in Kibana 9.x
+# ──────────────────────────────────────────────
+xpack.security.session.idleTimeout: "1h"
+xpack.security.session.lifespan: "30d"
+
+# ──────────────────────────────────────────────
+# Monitoring
+# ──────────────────────────────────────────────
+monitoring.ui.container.elasticsearch.enabled: true
+
+# NOTE: The following are intentionally omitted - injected via docker-compose.yml:
+# elasticsearch.hosts
+# elasticsearch.username
+# elasticsearch.password
+# elasticsearch.ssl.certificateAuthorities
+# elasticsearch.ssl.verificationMode
+# server.ssl.enabled
+# server.ssl.certificate
+# server.ssl.key
+# xpack.encryptedSavedObjects.encryptionKey
+# xpack.reporting.encryptionKey
+# xpack.security.encryptionKey
